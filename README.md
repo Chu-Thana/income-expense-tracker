@@ -105,7 +105,7 @@ Gold outputs are loaded to Redshift schema `income_expense_analytics` in tables 
 
 In the local test, adding a **THB 100** October expense and running the full pipeline changed monthly expense from **THB 9,450** to **THB 9,550**, while monthly net decreased from **THB 20,550** to **THB 20,450**. This is the end-to-end behavior demonstrated by the local application, DAG execution, and updated dashboard together.
 
-Additional evidence: [Local Dashboard](docs/evidence/02-local-dashboard.png) · [Transaction Entry & History](docs/evidence/03-transaction-created.png)
+Additional evidence: [Transaction Entry & History](docs/evidence/03-transaction-created.png)
 
 ### Public Interactive Demo — Browser Only
 
