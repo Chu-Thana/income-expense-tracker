@@ -3,7 +3,6 @@ import type { FormEvent } from "react";
 import "./App.css";
 
 const API_URL = "http://127.0.0.1:8000";
-const USER_ID = 1; // Mock user, no authentication
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const DEMO_STORAGE_KEY = "income-expense-public-demo-transactions-v1";
 
@@ -25,6 +24,7 @@ type MonthlySummary = {
 };
 
 function App() {
+  const [userId, setUserId] = useState<number>(1);
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
     if (!DEMO_MODE) return [];
     try {
@@ -33,6 +33,7 @@ function App() {
       return saved.filter((item): item is Transaction =>
         typeof item === "object" && item !== null &&
         typeof item.transaction_id === "number" &&
+        typeof item.user_id === "number" &&
         typeof item.transaction_date === "string" &&
         (item.transaction_type === "income" || item.transaction_type === "expense") &&
         typeof item.category === "string" &&
@@ -53,26 +54,39 @@ function App() {
   const [isUpdatingAnalytics, setIsUpdatingAnalytics] = useState(false);
   const [pipelineMessage, setPipelineMessage] = useState("");
 
-  async function loadTransactions() {
+  async function loadTransactions(
+    targetUserId: number = userId,
+    signal?: AbortSignal
+  ) {
     if (DEMO_MODE) return;
+
     const response = await fetch(
-      `${API_URL}/transactions?user_id=${USER_ID}`
+      `${API_URL}/transactions?user_id=${targetUserId}`,
+      { signal }
     );
 
     if (!response.ok) {
       throw new Error("Failed to load transactions");
     }
 
-    setTransactions(await response.json());
+    const data: Transaction[] = await response.json();
+
+    if (!signal?.aborted) {
+      setTransactions(data);
+    }
   }
 
-  async function loadAnalytics() {
+  async function loadAnalytics(
+    targetUserId: number = userId,
+    signal?: AbortSignal
+  ) {
     try {
       setAnalyticsError("");
       const response = await fetch(
         DEMO_MODE
           ? `${import.meta.env.BASE_URL}demo/monthly_summary.json`
-          : `${API_URL}/analytics/monthly?user_id=${USER_ID}`
+          : `${API_URL}/analytics/monthly?user_id=${targetUserId}`,
+        { signal }
       );
 
       if (!response.ok) {
@@ -89,11 +103,41 @@ function App() {
         throw new Error("Invalid analytics data");
       }
       const summaries = data as MonthlySummary[];
-      if (DEMO_MODE) setDemoBaseline(summaries);
-      else setMonthly(summaries);
+      if (signal?.aborted) return false;
+
+      if (DEMO_MODE) {
+        // User 1 uses the original demo snapshot. Users 2 and 3 receive
+        // distinct synthetic baselines; no backend or extra JSON files needed.
+        const mockDifferences: Record<number, { income: number; expense: number }> = {
+          1: { income: 0, expense: 0 },
+          2: { income: 5000, expense: 350 },
+          3: { income: 10000, expense: 950 },
+        };
+        const difference = mockDifferences[targetUserId] ?? mockDifferences[1];
+        setDemoBaseline(summaries.map((item) => {
+          const totalIncome = item.total_income + difference.income;
+          const totalExpense = item.total_expense + difference.expense;
+          return {
+            ...item,
+            total_income: totalIncome,
+            total_expense: totalExpense,
+            net_amount: totalIncome - totalExpense,
+          };
+        }));
+      } else {
+        setMonthly(summaries);
+      }
+
       return true;
+
     } catch {
-      setAnalyticsError(DEMO_MODE ? "Cannot load demo data" : "Cannot load Redshift analytics");
+      if (signal?.aborted) return false;
+
+      setAnalyticsError(
+        DEMO_MODE
+          ? "Cannot load demo data"
+          : "Cannot load Redshift analytics"
+      );
       return false;
     }
   }
@@ -157,18 +201,38 @@ function App() {
   }
 
   useEffect(() => {
-    loadTransactions().catch(() => {
-      setMessage("Cannot connect to FastAPI");
-    });
-    void loadAnalytics();
-  }, []);
+    const controller = new AbortController();
+
+    setMonthly([]);
+    setSelectedMonth(null);
+    setMessage("");
+    setAnalyticsError("");
+
+    if (DEMO_MODE) {
+      // Keep all demo transactions in state; display only the selected user.
+      void loadAnalytics(userId, controller.signal);
+    } else {
+      setTransactions([]);
+      loadTransactions(userId, controller.signal).catch(() => {
+        if (!controller.signal.aborted) {
+          setMessage("Cannot connect to FastAPI");
+        }
+      });
+
+      void loadAnalytics(userId, controller.signal);
+    }
+
+    return () => {
+      controller.abort();
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!DEMO_MODE || demoBaseline.length === 0) return;
 
     const updatedMonthly = demoBaseline.map((item) => {
       const monthTransactions = transactions.filter(
-        (tx) => tx.transaction_date.slice(0, 7) === item.month
+        (tx) => tx.user_id === userId && tx.transaction_date.slice(0, 7) === item.month
       );
 
       const addedIncome = monthTransactions
@@ -191,7 +255,7 @@ function App() {
     });
 
     setMonthly(updatedMonthly);
-  }, [demoBaseline, transactions]);
+  }, [demoBaseline, transactions, userId]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -209,7 +273,7 @@ function App() {
       }
       const newTransaction: Transaction = {
         transaction_id: Date.now(),
-        user_id: USER_ID,
+        user_id: userId,
         transaction_date: date,
         transaction_type: type,
         category,
@@ -235,7 +299,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: USER_ID,
+          user_id: userId,
           transaction_date: date,
           transaction_type: type,
           category,
@@ -317,6 +381,20 @@ function App() {
   return (
     <div className="container">
       <h1>Income & Expense Tracker</h1>
+
+      <div className="user-selector">
+        <label htmlFor="user-select">Select User</label>
+        <select
+          id="user-select"
+          value={userId}
+          disabled={isUpdatingAnalytics}
+          onChange={(e) => setUserId(Number(e.target.value))}
+        >
+          <option value={1}>User 1</option>
+          <option value={2}>User 2</option>
+          <option value={3}>User 3</option>
+        </select>
+      </div>
 
       <section className="analytics analytics-card">
         <div className="analytics-top">
@@ -530,10 +608,18 @@ function App() {
           <button
             type="button"
             onClick={() => {
-              localStorage.removeItem(DEMO_STORAGE_KEY);
-              setTransactions([]);
+              const updated = transactions.filter((tx) => tx.user_id !== userId);
+              try {
+                localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(updated));
+              } catch {
+                setMessage("Browser storage unavailable. Reset may not persist.");
+                setTransactions(updated);
+                setSelectedMonth(null);
+                return;
+              }
+              setTransactions(updated);
               setSelectedMonth(null);
-              setMessage("Demo reset to original snapshot.");
+              setMessage(`Demo data reset for User ${userId}.`);
             }}
           >
             Reset Demo Data
@@ -551,10 +637,10 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {DEMO_MODE && transactions.length === 0 && (
+            {DEMO_MODE && transactions.filter((tx) => tx.user_id === userId).length === 0 && (
               <tr><td colSpan={4}>No demo transactions yet. Add one above to test.</td></tr>
             )}
-            {transactions.map((tx) => (
+            {transactions.filter((tx) => tx.user_id === userId).map((tx) => (
               <tr key={tx.transaction_id}>
                 <td>{tx.transaction_date}</td>
                 <td>{tx.transaction_type}</td>
